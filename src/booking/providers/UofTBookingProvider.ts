@@ -12,6 +12,7 @@ export class UofTBookingProvider implements BookingProvider {
 
   async isAuthenticated(): Promise<boolean> {
     const page = await this.browser.getPage()
+    await page.goto(this.bookingUrl, { waitUntil: 'domcontentloaded' })
     return page.getByText('Select Date & Time', { exact: true }).isVisible().catch(() => false)
   }
 
