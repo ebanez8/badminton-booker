@@ -3,13 +3,13 @@ import { DateTime } from 'luxon'
 import { calculateReleaseDateTime } from '../booking/logic/releaseTime'
 import type { AppSettings, BookingHistoryEntry, BookingRequest, BookingState } from '../shared/types'
 
-const initialRequest: BookingRequest = { activity: 'Badminton', date: '2026-09-20', time: '19:00', courtPreferences: ['Court 3', 'Court 2', 'Court 1'], allowAnyCourt: true, releaseRule: { mode: 'offset-hours', offsetHours: 48 } }
+const initialRequest: BookingRequest = { activity: 'Badminton', date: '2026-09-20', time: '19:00', courtPreferences: ['Court 03-AC-Badminton', 'Court 02-AC-Badminton', 'Court 01-AC-Badminton'], allowAnyCourt: true, releaseRule: { mode: 'offset-hours', offsetHours: 48 } }
 const initialState: BookingState = { status: 'idle', message: 'Ready to configure booking.', updatedAt: new Date().toISOString() }
 
 export function App() {
   const [request, setRequest] = useState(initialRequest)
   const [state, setState] = useState(initialState)
-  const [courts, setCourts] = useState('Court 3\nCourt 2\nCourt 1')
+  const [courts, setCourts] = useState('Court 03-AC-Badminton\nCourt 02-AC-Badminton\nCourt 01-AC-Badminton')
   const [settings, setSettings] = useState<AppSettings>()
   const [history, setHistory] = useState<BookingHistoryEntry[]>([])
   useEffect(() => {
@@ -28,7 +28,7 @@ export function App() {
   const locked = !['idle', 'failed', 'cancelled', 'confirmed', 'login-required'].includes(state.status)
   return <main>
     <header><p className="eyebrow">UNIVERSITY OF TORONTO RECREATION</p><h1>Court Booker</h1><p>Prepare one future court booking. Login stays in your private local browser profile.</p></header>
-    <section className="card status"><span className={`dot ${state.status}`} /> <div><b>{state.status.replaceAll('-', ' ')}</b><p>{state.message}</p></div>{state.status === 'login-required' && <button onClick={() => void window.bookingAPI.openLogin()}>OPEN LOGIN</button>}</section>
+    <section className="card status"><span className={`dot ${state.status}`} /> <div><b>{state.status.replaceAll('-', ' ')}</b><p>{state.message}</p>{state.error?.technicalMessage && <details><summary>Attempt details</summary><pre>{state.error.technicalMessage}</pre></details>}</div>{state.status === 'login-required' && <button onClick={() => void window.bookingAPI.openLogin()}>OPEN LOGIN</button>}</section>
     <section className="grid">
       <form className="card" onSubmit={(event) => { event.preventDefault(); void arm() }}>
         <h2>Booking details</h2>
