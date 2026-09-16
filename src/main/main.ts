@@ -40,6 +40,7 @@ async function initializeServices(): Promise<void> {
 function registerIpc(): void {
   ipcMain.handle('booking:get-state', () => engine.getState())
   ipcMain.handle('booking:arm', (_event, request: BookingRequest) => engine.arm(request))
+  ipcMain.handle('booking:confirm-reservation', () => engine.confirmReservation())
   ipcMain.handle('booking:cancel', () => engine.cancel())
   ipcMain.handle('booking:open-login', () => {
     const request = engine.getState().request

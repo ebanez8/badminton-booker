@@ -1,6 +1,6 @@
 export const BOOKING_STATUSES = [
   'idle', 'initializing', 'checking-authentication', 'login-required', 'preparing', 'armed',
-  'waiting-for-release', 'checking-availability', 'selecting-court', 'reserving', 'confirming',
+  'waiting-for-release', 'checking-availability', 'selecting-court', 'confirmation-required', 'reserving', 'confirming',
   'confirmed', 'failed', 'cancelled'
 ] as const
 
@@ -64,6 +64,7 @@ export interface BookingHistoryEntry extends BookingResult {
 export interface BookingApi {
   getState(): Promise<BookingState>
   armBooking(request: BookingRequest): Promise<BookingState>
+  confirmReservation(): Promise<BookingState>
   cancelBooking(): Promise<BookingState>
   openLogin(): Promise<void>
   getSettings(): Promise<AppSettings>
@@ -71,4 +72,3 @@ export interface BookingApi {
   getHistory(): Promise<BookingHistoryEntry[]>
   onStateChange(listener: (state: BookingState) => void): () => void
 }
-

@@ -28,7 +28,7 @@ export function App() {
   const locked = !['idle', 'failed', 'cancelled', 'confirmed', 'login-required'].includes(state.status)
   return <main>
     <header><p className="eyebrow">UNIVERSITY OF TORONTO RECREATION</p><h1>Court Booker</h1><p>Prepare one future court booking. Login stays in your private local browser profile.</p></header>
-    <section className="card status"><span className={`dot ${state.status}`} /> <div><b>{state.status.replaceAll('-', ' ')}</b><p>{state.message}</p>{state.error?.technicalMessage && <details><summary>Attempt details</summary><pre>{state.error.technicalMessage}</pre></details>}</div>{state.status === 'login-required' && <button onClick={() => void window.bookingAPI.openLogin()}>OPEN LOGIN</button>}</section>
+    <section className="card status"><span className={`dot ${state.status}`} /> <div><b>{state.status.replaceAll('-', ' ')}</b><p>{state.message}</p>{state.error?.technicalMessage && <details><summary>Attempt details</summary><pre>{state.error.technicalMessage}</pre></details>}</div>{state.status === 'login-required' && <button onClick={() => void window.bookingAPI.openLogin()}>OPEN LOGIN</button>}{state.status === 'confirmation-required' && <button onClick={() => void window.bookingAPI.confirmReservation()}>CONFIRM BOOKING</button>}</section>
     <section className="grid">
       <form className="card" onSubmit={(event) => { event.preventDefault(); void arm() }}>
         <h2>Booking details</h2>

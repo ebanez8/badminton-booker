@@ -4,6 +4,7 @@ import type { AppSettings, BookingRequest } from '../shared/types'
 contextBridge.exposeInMainWorld('bookingAPI', {
   getState: () => ipcRenderer.invoke('booking:get-state'),
   armBooking: (request: BookingRequest) => ipcRenderer.invoke('booking:arm', request),
+  confirmReservation: () => ipcRenderer.invoke('booking:confirm-reservation'),
   cancelBooking: () => ipcRenderer.invoke('booking:cancel'),
   openLogin: () => ipcRenderer.invoke('booking:open-login'),
   getSettings: () => ipcRenderer.invoke('settings:get'),
