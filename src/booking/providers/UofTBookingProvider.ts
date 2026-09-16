@@ -32,25 +32,18 @@ export class UofTBookingProvider implements BookingProvider {
     const page = await this.browser.getPage()
     await page.reload({ waitUntil: 'domcontentloaded' })
     await this.selectDate(page, request.date)
-    const buttons = page.getByRole('button', { name: /^book$/i })
-    const count = await buttons.count()
-    if (!count) throw await this.pageError(page, 'No enabled Book controls found for the requested time.')
-
-    const slot = this.timePattern(request.time)
+    const rows = page.locator('.booking-slot-item').filter({ has: page.locator('strong', { hasText: this.timePattern(request.time) }) })
+    const rowCount = await rows.count()
+    if (!rowCount) throw await this.pageError(page, `No schedule row matched ${request.time}.`)
     const available: CourtAvailability[] = []
-    for (let index = 0; index < count; index += 1) {
-      const button = buttons.nth(index)
-      const context = await button.evaluate((element) => {
-        let current: Element | null = element
-        let best = element.textContent ?? ''
-        for (let depth = 0; current && depth < 7; depth += 1, current = current.parentElement) {
-          const text = current.textContent ?? ''
-          if (text.length > best.length && text.length < 1200) best = text
-        }
-        return best.replace(/\s+/g, ' ').trim()
-      })
-      const court = this.courtFromText(context)
-      if (court && slot.test(context)) available.push({ id: String(index), name: court, available: true })
+    for (let index = 0; index < rowCount; index += 1) {
+      const row = rows.nth(index)
+      const button = row.locator('button:not([disabled])').filter({ hasText: /^book$/i })
+      if (!(await button.count()) || !(await button.isEnabled())) continue
+      const label = await button.getAttribute('aria-label')
+      const court = this.courtFromText(label ?? '')
+      const slotNumber = await row.getAttribute('data-slot-number')
+      if (court && slotNumber) available.push({ id: `${court}|${slotNumber}`, name: court, available: true })
     }
     if (!available.length) throw await this.pageError(page, `No Book control matched ${request.time}.`)
     return available
@@ -59,7 +52,9 @@ export class UofTBookingProvider implements BookingProvider {
   async reserve(request: BookingRequest, court: CourtAvailability): Promise<BookingResult> {
     this.requirePreparedPage()
     const page = await this.browser.getPage()
-    const button = page.getByRole('button', { name: /^book$/i }).nth(Number(court.id))
+    const [courtName, slotNumber] = court.id.split('|')
+    const row = page.locator(`.booking-slot-item[data-slot-number="${slotNumber}"]`)
+    const button = row.locator(`button[aria-label*="${courtName}"]:not([disabled])`)
     if (!(await button.isVisible().catch(() => false))) throw await this.pageError(page, `Book control for ${court.name} is no longer available.`)
     await button.click()
     const outcome = await Promise.race([
@@ -87,7 +82,7 @@ export class UofTBookingProvider implements BookingProvider {
     const hour = Number(hourText)
     const displayHour = hour % 12 || 12
     const meridiem = hour < 12 ? 'AM' : 'PM'
-    return new RegExp(`\\b${displayHour}(?::00)?\\s*(?:-|–|to)\\s*${displayHour}(?::\\d{2})?\\s*${meridiem}`, 'i')
+    return new RegExp(`^${displayHour}(?::00)?\\s*(?:-|–|to)\\s*${displayHour}(?::\\d{2})?\\s*${meridiem}$`, 'i')
   }
 
   private courtFromText(text: string): string | undefined {
