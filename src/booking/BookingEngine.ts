@@ -9,7 +9,6 @@ interface BookingLogger { info(message: string): Promise<void> }
 
 export class BookingEngine {
   private state: BookingState = { status: 'idle', message: 'Ready to configure booking.', updatedAt: new Date().toISOString() }
-  private pendingReservation?: { request: BookingRequest; court: CourtAvailability }
   private listeners = new Set<(state: BookingState) => void>()
   constructor(private readonly provider: BookingProvider, private readonly scheduler: BookingScheduler, private readonly options: { maxRetries: number; retryDelayMs: number; saveHistory(entry: BookingHistoryEntry): Promise<void>; logger: BookingLogger }) {}
   getState(): BookingState { return this.state }
@@ -36,13 +35,7 @@ export class BookingEngine {
     return this.state
   }
   cancel(): BookingState { this.scheduler.cancel(); return this.setState('cancelled', 'Booking cancelled.') }
-  async confirmReservation(): Promise<BookingState> {
-    const pending = this.pendingReservation
-    if (!pending) return this.state
-    this.pendingReservation = undefined
-    await this.reserve(pending.request, pending.court)
-    return this.state
-  }
+  async confirmReservation(): Promise<BookingState> { return this.state }
   async close(): Promise<void> { this.scheduler.cancel(); await this.provider.close() }
   private async attemptBooking(request: BookingRequest): Promise<void> {
     try {
@@ -51,8 +44,7 @@ export class BookingEngine {
       this.setState('selecting-court', 'Selecting highest-priority court...')
       const court = chooseCourt(courts, request.courtPreferences, request.allowAnyCourt)
       if (!court) throw new BookingError('NO_AVAILABLE_COURTS')
-      this.pendingReservation = { request, court }
-      this.setState('confirmation-required', `${court.name} is available. Confirm to click Book.`)
+      await this.reserve(request, court)
     } catch (error) { this.fail(error) }
   }
   private async reserve(request: BookingRequest, court: CourtAvailability): Promise<void> {

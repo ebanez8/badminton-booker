@@ -9,7 +9,9 @@ export function validateBookingRequest(request: BookingRequest): string[] {
   try {
     const desired = desiredDateTime(request)
     if (desired <= DateTime.now().setZone(desired.zoneName)) errors.push('Desired booking time must be in future.')
-    if (calculateReleaseDateTime(request) >= desired) errors.push('Release must be before desired booking.')
+    if (request.releaseRule.mode !== 'offset-hours' || request.releaseRule.offsetHours !== 48) {
+      errors.push('U of T badminton bookings release exactly 48 hours before the requested start time.')
+    } else if (calculateReleaseDateTime(request) >= desired) errors.push('Release must be before desired booking.')
   } catch { errors.push('Enter valid Toronto date, time, and release rule.') }
   return errors
 }

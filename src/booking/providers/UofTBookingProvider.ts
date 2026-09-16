@@ -4,6 +4,13 @@ import { BrowserManager } from '../automation/BrowserManager'
 import type { BookingProvider } from './BookingProvider'
 import type { Page } from 'playwright'
 
+export function uOfTDateButtonSelector(date: string): string {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(date)
+  if (!match) throw new BookingError('VALIDATION_ERROR', 'Invalid booking date')
+  const [, year, month, day] = match
+  return `button.single-date-select-button[data-year="${Number(year)}"][data-month="${Number(month)}"][data-day="${Number(day)}"]`
+}
+
 export class UofTBookingProvider implements BookingProvider {
   private pageReady = false
   constructor(private readonly browser: BrowserManager, private readonly bookingUrl: string) {}
@@ -79,11 +86,17 @@ export class UofTBookingProvider implements BookingProvider {
   private requirePreparedPage(): void { if (!this.pageReady) throw new BookingError('UNKNOWN_ERROR', 'Booking page was not prepared') }
 
   private async selectDate(page: Page, date: string): Promise<void> {
-    const dateInput = page.locator('input[type="date"]').first()
-    if (!(await dateInput.count())) return
-    await dateInput.fill(date)
-    await dateInput.press('Enter')
-    await page.waitForLoadState('domcontentloaded').catch(() => undefined)
+    const dateButton = page.locator(uOfTDateButtonSelector(date)).first()
+    if (!(await dateButton.count())) {
+      throw await this.pageError(page, `Date ${date} is not available in the U of T two-day date picker.`)
+    }
+    if (await dateButton.getAttribute('aria-current') !== 'date') await dateButton.click()
+    try {
+      await dateButton.waitFor({ state: 'visible', timeout: 5_000 })
+      await page.locator(`${uOfTDateButtonSelector(date)}[aria-current="date"]`).waitFor({ state: 'visible', timeout: 5_000 })
+    } catch {
+      throw await this.pageError(page, `Date ${date} did not become the selected booking date.`)
+    }
   }
 
   private timePattern(time: string): RegExp {

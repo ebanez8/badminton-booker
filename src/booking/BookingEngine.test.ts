@@ -21,4 +21,23 @@ describe('BookingEngine state transitions', () => {
     expect(engine.cancel().status).toBe('cancelled')
     expect(messages).toContain('Booking armed.')
   })
+
+  it('submits the selected court directly when the release callback runs', async () => {
+    let release: (() => Promise<void>) | undefined
+    let reserveCalls = 0
+    const scheduler = new BookingScheduler()
+    scheduler.arm = (_releaseAtMs, callbacks) => { release = callbacks.release }
+    const bookingProvider: BookingProvider = {
+      ...provider,
+      getAvailability: async () => [{ id: 'Court 03-AC-Badminton|8', name: 'Court 03-AC-Badminton', available: true }],
+      reserve: async () => { reserveCalls += 1; return { success: true, court: 'Court 03-AC-Badminton', message: 'Booked' } }
+    }
+    const engine = new BookingEngine(bookingProvider, scheduler, {
+      maxRetries: 1, retryDelayMs: 1, saveHistory: async () => undefined, logger: { info: async () => undefined }
+    })
+    await engine.arm(request)
+    await release?.()
+    expect(reserveCalls).toBe(1)
+    expect(engine.getState().status).toBe('confirmed')
+  })
 })
