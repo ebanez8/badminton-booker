@@ -1,0 +1,11 @@
+node_modules/
+out/
+dist/
+.env
+.env.*
+!.env.example
+data/browser-profile/
+browser-profile/
+playwright/.cache/
+*.log
+
