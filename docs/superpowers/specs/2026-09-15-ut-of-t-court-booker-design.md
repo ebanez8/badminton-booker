@@ -24,9 +24,15 @@ Playwright launches a persistent Chromium profile under Electron user data, neve
 
 Non-sensitive settings and successful history use JSON in Electron user data. History contains booking metadata and confirmation details only. Strongly typed status/error codes map to friendly UI messages; technical details go to redacted local logs. Success requires provider confirmation evidence, never a clicked button alone.
 
-## U of T provider delivery boundary
+## U of T provider delivery
 
-Browser initialization, persistent-session lifecycle, and generic authentication workflow ship now. Date/time/court/reservation/confirmation selectors remain explicit provider TODOs until an authenticated page is inspected. Until then the provider returns actionable `PAGE_STRUCTURE_CHANGED` errors rather than guessing or reserving.
+The authenticated S&R Badminton page exposes a "Select Date & Time" availability grid with three court columns: `Court 01-AC-Badminton`, `Court 02-AC-Badminton`, and `Court 03-AC-Badminton`. Each time row reports availability and, when eligible, presents a `Book` control. The provider will use scoped, semantic locators (court label, time-row text, availability text, and the row's `Book` button), rather than page-wide positional or CSS selectors.
+
+At the scheduled release instant, the provider refreshes the page, resolves the configured Toronto-local date and time row, and attempts the requested court priority in order. If `allowAnyCourt` is set, it may use another court in the same row only after the priority choices have no available `Book` control. After clicking `Book`, it waits for an explicit successful booked state; a click alone is never confirmation.
+
+CAPTCHA is a manual handoff: the visible browser stays open, the scheduler changes to a login/action-required state, and the user completes it. If the site displays an error, unavailable state, timeout, unexpected dialog, or no booked confirmation, the provider records redacted diagnostic evidence (URL, visible status text, selected court/time, and screenshot path) and exposes a friendly, actionable failure message in the app. It never log credentials, cookies, CAPTCHA content, or access tokens.
+
+For the initial live test, the configured release is Thursday at 10:00 PM America/Toronto for a Saturday 10:00 PM slot, satisfying the two-day booking rule. The final external `Book` submission requires immediate user confirmation at runtime.
 
 ## Verification
 
