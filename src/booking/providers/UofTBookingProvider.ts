@@ -13,7 +13,15 @@ export class UofTBookingProvider implements BookingProvider {
   async isAuthenticated(): Promise<boolean> {
     const page = await this.browser.getPage()
     await page.goto(this.bookingUrl, { waitUntil: 'domcontentloaded' })
-    return page.getByText('Select Date & Time', { exact: true }).isVisible().catch(() => false)
+    // Fusion renders the schedule after DOMContentLoaded. A one-shot visibility check here
+    // produced a false login-required state for already authenticated profiles.
+    const schedule = page.locator('.booking-slot-item').first()
+    try {
+      await schedule.waitFor({ state: 'visible', timeout: 15_000 })
+      return true
+    } catch {
+      return false
+    }
   }
 
   async requestAuthentication(): Promise<void> {
