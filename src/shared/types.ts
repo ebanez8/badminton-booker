@@ -35,6 +35,13 @@ export interface BookingResult {
   message: string
 }
 export interface BookingFailure { code: BookingErrorCode; userMessage: string; technicalMessage?: string }
+export interface BookingTiming {
+  releaseStartedAt?: string
+  releaseDelayMs?: number
+  availabilityCompletedAt?: string
+  submissionStartedAt?: string
+  confirmedAt?: string
+}
 export interface BookingState {
   status: BookingStatus
   message: string
@@ -42,6 +49,7 @@ export interface BookingState {
   releaseDateTime?: string
   result?: BookingResult
   error?: BookingFailure
+  timing?: BookingTiming
   updatedAt: string
 }
 export interface AppSettings {

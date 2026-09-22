@@ -1,41 +1,40 @@
-export interface ScheduleCallbacks { prepare(): Promise<void>; release(): Promise<void>; waiting(): void }
+export interface ScheduleCallbacks { prepare(): Promise<void>; release(): Promise<void>; waiting(): void; error(error: unknown): void }
 
 export class BookingScheduler {
-  private static readonly maxTimerDelayMs = 2_000_000_000
-  private preparationTimer?: NodeJS.Timeout
-  private releaseTimer?: NodeJS.Timeout
-  private cancelled = false
+  // Recheck the wall clock so an OS time correction cannot leave a hours-long
+  // monotonic timeout pointing at an obsolete deadline. No network polling.
+  private static readonly maxTimerDelayMs = 1_000
+  private timer?: NodeJS.Timeout
+  private generation = 0
 
   arm(releaseAtMs: number, callbacks: ScheduleCallbacks, preparationLeadMs = 120_000): void {
-    this.cancelled = false
-    this.schedulePreparation(releaseAtMs - preparationLeadMs, callbacks)
-    this.scheduleRelease(releaseAtMs, callbacks)
-  }
-
-  private schedulePreparation(atMs: number, callbacks: ScheduleCallbacks): void {
-    const delay = Math.max(0, atMs - Date.now())
-    this.preparationTimer = setTimeout(async () => {
-      if (this.cancelled) return
-      if (Date.now() < atMs) return this.schedulePreparation(atMs, callbacks)
+    this.cancel()
+    const generation = this.generation
+    this.scheduleAt(releaseAtMs - preparationLeadMs, generation, async () => {
       await callbacks.prepare()
-      if (!this.cancelled) callbacks.waiting()
-    }, Math.min(delay, BookingScheduler.maxTimerDelayMs))
+      if (generation !== this.generation) return
+      if (Date.now() < releaseAtMs) callbacks.waiting()
+      this.scheduleAt(releaseAtMs, generation, callbacks.release, callbacks.error)
+    }, callbacks.error)
   }
 
-  private scheduleRelease(atMs: number, callbacks: ScheduleCallbacks): void {
-    const delay = Math.max(0, atMs - Date.now())
-    this.releaseTimer = setTimeout(async () => {
-      if (this.cancelled) return
-      if (Date.now() < atMs) return this.scheduleRelease(atMs, callbacks)
-      await callbacks.release()
-    }, Math.min(delay, BookingScheduler.maxTimerDelayMs))
+  private scheduleAt(atMs: number, generation: number, action: () => Promise<void>, onError: (error: unknown) => void): void {
+    if (generation !== this.generation) return
+    const remaining = atMs - Date.now()
+    if (remaining <= 0) {
+      this.timer = undefined
+      void (async () => action())().catch((error: unknown) => { if (generation === this.generation) onError(error) })
+      return
+    }
+    this.timer = setTimeout(() => {
+      if (generation !== this.generation) return
+      this.scheduleAt(atMs, generation, action, onError)
+    }, Math.min(remaining > 20 ? remaining - 10 : 1, BookingScheduler.maxTimerDelayMs))
   }
 
   cancel(): void {
-    this.cancelled = true
-    if (this.preparationTimer) clearTimeout(this.preparationTimer)
-    if (this.releaseTimer) clearTimeout(this.releaseTimer)
-    this.preparationTimer = undefined
-    this.releaseTimer = undefined
+    this.generation += 1
+    if (this.timer) clearTimeout(this.timer)
+    this.timer = undefined
   }
 }
