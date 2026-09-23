@@ -25,6 +25,27 @@ describe('BookingEngine state transitions', () => {
     expect(messages).toContain('Booking armed.')
   })
 
+  it('shares one schedule read between concurrent callers and asks for sign-in when needed', async () => {
+    let reads = 0
+    const scheduleProvider: BookingProvider = { ...provider, getSchedule: async () => { reads += 1; return [{ date: '2026-09-20', slots: [] }] } }
+    const engine = new BookingEngine(scheduleProvider, new BookingScheduler(), { maxRetries: 1, retryDelayMs: 1, saveHistory: async () => undefined, logger: { info: async () => undefined } })
+    const [first, second] = await Promise.all([engine.loadSchedule(), engine.loadSchedule()])
+    expect(reads).toBe(1)
+    expect(first.days).toEqual([{ date: '2026-09-20', slots: [] }])
+    expect(second).toBe(first)
+    let authRequested = false
+    const signedOut = new BookingEngine({ ...scheduleProvider, isAuthenticated: async () => false, requestAuthentication: async () => { authRequested = true } }, new BookingScheduler(), { maxRetries: 1, retryDelayMs: 1, saveHistory: async () => undefined, logger: { info: async () => undefined } })
+    expect(await signedOut.loadSchedule()).toMatchObject({ loginRequired: true, days: [] })
+    expect(authRequested).toBe(true)
+  })
+
+  it('refuses to read the schedule while a booking is armed', async () => {
+    const engine = new BookingEngine(provider, new BookingScheduler(), { maxRetries: 1, retryDelayMs: 1, saveHistory: async () => undefined, logger: { info: async () => undefined } })
+    await engine.arm(request)
+    await expect(engine.loadSchedule()).rejects.toMatchObject({ code: 'VALIDATION_ERROR' })
+    engine.cancel()
+  })
+
   it('submits the selected court directly when the release callback runs', async () => {
     let release: (() => Promise<void>) | undefined
     let reserveCalls = 0

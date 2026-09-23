@@ -26,6 +26,21 @@ export interface BookingRequest {
 }
 
 export interface CourtAvailability { id: string; name: string; available: boolean }
+
+/**
+ * How U of T shows one court's slot: Book Now ('open'); "Opens at 9 PM" or "Unavailable" with
+ * spots left ('opens-later'); your own reservation ('booked'); "No spots available" ('unavailable').
+ */
+export type SlotStatus = 'open' | 'opens-later' | 'booked' | 'unavailable'
+export interface ScheduleSlot {
+  /** Toronto start time, HH:mm (24 h). */
+  time: string
+  /** The site's label, e.g. "9 - 9:55 PM". */
+  label: string
+  courts: { court: string; status: SlotStatus; note?: string }[]
+}
+export interface ScheduleDay { date: string; slots: ScheduleSlot[] }
+export interface ScheduleResult { loginRequired: boolean; days: ScheduleDay[]; loadedAt: string }
 export interface BookingResult {
   success: boolean
   court?: string
@@ -78,5 +93,6 @@ export interface BookingApi {
   getSettings(): Promise<AppSettings>
   saveSettings(settings: AppSettings): Promise<AppSettings>
   getHistory(): Promise<BookingHistoryEntry[]>
+  getSchedule(): Promise<ScheduleResult>
   onStateChange(listener: (state: BookingState) => void): () => void
 }

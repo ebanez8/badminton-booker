@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { uOfTDateButtonSelector, uOfTTimeMatches } from './UofTBookingProvider'
+import { uOfTDateButtonSelector, uOfTStartTime, uOfTTimeMatches } from './UofTBookingProvider'
 
 describe('uOfTDateButtonSelector', () => {
   it('uses the one-based date attributes exposed by the U of T date picker', () => {
@@ -19,6 +19,12 @@ describe('U of T slot times', () => {
     ['11:30 AM - 12:20 PM', '11:30'], ['11 - 12 PM', '11:00'],
     ['12 - 12:50 PM', '12:00'], ['11:30 - 12:20 AM', '23:30']
   ])('matches %s to %s', (label, time) => expect(uOfTTimeMatches(label, time)).toBe(true))
+  it('reads the 24-hour start time used by the calendar', () => {
+    expect(uOfTStartTime('9 - 9:55 PM')).toBe('21:00')
+    expect(uOfTStartTime('10 - 10:50 PM')).toBe('22:00')
+    expect(uOfTStartTime('7 - 7:55 AM')).toBe('07:00')
+    expect(uOfTStartTime('Opens at 9 PM')).toBeUndefined()
+  })
   it('does not book a different minute in the same hour', () => {
     expect(uOfTTimeMatches('9:10 - 9:55 PM', '21:00')).toBe(false)
     expect(uOfTTimeMatches('7 - 7:50 PM', '19:30')).toBe(false)

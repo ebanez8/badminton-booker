@@ -1,4 +1,4 @@
-import type { BookingHistoryEntry, BookingRequest, BookingState, BookingStatus, CourtAvailability } from '../shared/types'
+import type { BookingHistoryEntry, BookingRequest, BookingState, BookingStatus, CourtAvailability, ScheduleResult } from '../shared/types'
 import type { BookingProvider } from './providers/BookingProvider'
 import { BookingError } from './errors/BookingError'
 import { chooseCourt } from './logic/chooseCourt'
@@ -13,11 +13,30 @@ export class BookingEngine {
   private generation = 0
   private stopping?: Promise<void>
   private pendingReservation?: { request: BookingRequest; court: CourtAvailability }
+  private scheduleRun?: Promise<ScheduleResult>
   constructor(private readonly provider: BookingProvider, private readonly scheduler: BookingScheduler, private readonly options: { maxRetries: number; retryDelayMs: number; saveHistory(entry: BookingHistoryEntry): Promise<void>; logger: BookingLogger }) {}
   getState(): BookingState { return this.state }
   subscribe(listener: (state: BookingState) => void): () => void { this.listeners.add(listener); return () => this.listeners.delete(listener) }
+  /** Reads the live U of T schedule. Concurrent calls share one read; not allowed while a booking is active. */
+  async loadSchedule(): Promise<ScheduleResult> {
+    if (!['idle', 'failed', 'cancelled', 'confirmed', 'login-required'].includes(this.state.status)) throw new BookingError('VALIDATION_ERROR', 'Cancel the current booking before refreshing the schedule.')
+    this.scheduleRun ??= (async () => {
+      if (this.stopping) await this.stopping
+      const loadedAt = new Date().toISOString()
+      if (!this.provider.getSchedule) return { loginRequired: false, days: [], loadedAt }
+      await this.provider.initialize()
+      if (!(await this.provider.isAuthenticated())) {
+        await this.provider.requestAuthentication()
+        return { loginRequired: true, days: [], loadedAt }
+      }
+      return { loginRequired: false, days: await this.provider.getSchedule(), loadedAt }
+    })().finally(() => { this.scheduleRun = undefined })
+    return this.scheduleRun
+  }
   async arm(request: BookingRequest): Promise<BookingState> {
     if (!['idle', 'failed', 'cancelled', 'confirmed', 'login-required'].includes(this.state.status)) return this.state
+    // The schedule read drives the same page; let it finish first.
+    if (this.scheduleRun) await this.scheduleRun.catch(() => undefined)
     this.scheduler.cancel()
     const generation = ++this.generation
     this.pendingReservation = undefined
@@ -61,7 +80,7 @@ export class BookingEngine {
   async confirmReservation(): Promise<BookingState> {
     if (this.state.status !== 'confirmation-required' || !this.pendingReservation) return this.state
     const { request, court } = this.pendingReservation
-    await this.reserve(request, court, true)
+    await this.reserve(request, court, 'verify')
     return this.state
   }
   async close(): Promise<void> { this.generation += 1; this.scheduler.cancel(); await this.provider.close() }
@@ -72,6 +91,22 @@ export class BookingEngine {
       const releaseDelayMs = started - releaseAtMs
       this.setState('checking-availability', 'Checking availability...', { timing: { releaseStartedAt: new Date(started).toISOString(), releaseDelayMs } })
       void this.options.logger.info(`Release check started ${releaseDelayMs} ms after scheduled release.`).catch(() => undefined)
+      // Normal path: the page has been clicking the court tab since shortly before
+      // release and clicks Book itself; only confirmation is left for us.
+      this.setState('checking-availability', `Refreshing ${request.courtPreferences[0] ?? 'court'} until the ${request.time} slot opens...`)
+      const clicked = await this.provider.waitForReleaseClick?.(request).catch((error: unknown) => {
+        // The loop stops as 'invalid' before any Book click, so the checked path below is safe.
+        if (!(error instanceof BookingError) || error.code !== 'PAGE_STRUCTURE_CHANGED') throw error
+        void this.options.logger.info(`Release loop stopped (${error.message}); falling back to availability checks.`).catch(() => undefined)
+        return undefined
+      })
+      if (generation !== this.generation) return
+      if (clicked) {
+        void this.options.logger.info(`Book clicked for ${clicked.court.name} at ${new Date(clicked.clickedAt).toISOString()} (${clicked.clickedAt - releaseAtMs} ms vs release) after ${clicked.refreshes} court refreshes.`).catch(() => undefined)
+        this.setState('reserving', `Book clicked for ${clicked.court.name}. Confirming...`, { timing: { ...this.state.timing, availabilityCompletedAt: new Date(clicked.clickedAt).toISOString(), submissionStartedAt: new Date(clicked.clickedAt).toISOString() } })
+        await this.reserve(request, clicked.court, 'submitted')
+        return
+      }
       await this.withRetries(async () => {
         const courts = await this.provider.getAvailability(request)
         if (generation !== this.generation) throw new BookingError('BOOKING_CANCELLED')
@@ -82,12 +117,16 @@ export class BookingEngine {
       }, generation)
     } catch (error) { if (generation === this.generation) this.fail(error) }
   }
-  private async reserve(request: BookingRequest, court: CourtAvailability, verifyOnly = false): Promise<void> {
+  private async reserve(request: BookingRequest, court: CourtAvailability, mode: 'submit' | 'submitted' | 'verify' = 'submit'): Promise<void> {
+    // 'submitted': the page already clicked Book, so only confirm, exactly like a recheck.
+    const verifyOnly = mode !== 'submit'
     try {
       this.pendingReservation = { request, court }
-      this.setState(verifyOnly ? 'confirming' : 'reserving', verifyOnly ? 'Rechecking reservation...' : `Reserving ${court.name}...`, {
-        error: undefined, timing: verifyOnly ? this.state.timing : { ...this.state.timing, submissionStartedAt: new Date().toISOString() }
-      })
+      if (mode !== 'submitted') {
+        this.setState(verifyOnly ? 'confirming' : 'reserving', verifyOnly ? 'Rechecking reservation...' : `Reserving ${court.name}...`, {
+          error: undefined, timing: verifyOnly ? this.state.timing : { ...this.state.timing, submissionStartedAt: new Date().toISOString() }
+        })
+      }
       // A timeout after submission is ambiguous: never blindly click Book twice.
       const result = verifyOnly ? await this.provider.confirmReservation(request, court) : await this.provider.reserve(request, court)
       if (!result.success) throw new BookingError('BOOKING_CONFIRMATION_FAILED', result.message)

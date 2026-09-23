@@ -5,7 +5,7 @@ export const defaultSettings: AppSettings = {
   bookingUrl: 'https://recreation.utoronto.ca/booking/33215bab-05b9-41de-be04-c9ae496d5609',
   defaultActivity: 'Badminton', defaultReleaseOffsetHours: 48, maxRetries: 3, retryDelayMs: 1000,
   showBrowser: true, headlessWhenAuthenticated: false, allowAnyCourt: true,
-  defaultCourtOrder: ['Court 03-AC-Badminton', 'Court 02-AC-Badminton', 'Court 01-AC-Badminton']
+  defaultCourtOrder: ['Court 01-AC-Badminton', 'Court 02-AC-Badminton', 'Court 03-AC-Badminton']
 }
 export class SettingsRepository {
   constructor(private readonly store: JsonStore<AppSettings>) {}

@@ -1,8 +1,8 @@
-import type { BookingRequest, BookingResult, CourtAvailability } from '../../shared/types'
+import type { BookingRequest, BookingResult, CourtAvailability, ScheduleDay, ScheduleSlot, SlotStatus } from '../../shared/types'
 import { BookingError } from '../errors/BookingError'
 import { BrowserManager } from '../automation/BrowserManager'
-import { ScheduledCourtClick } from '../automation/ScheduledCourtClick'
-import type { BookingProvider } from './BookingProvider'
+import { ReleaseRefreshLoop, RELEASE_LOOP_TIMING } from '../automation/ReleaseRefreshLoop'
+import type { BookingProvider, ReleaseClick } from './BookingProvider'
 import type { Locator, Page, Response } from 'playwright'
 import { DateTime } from 'luxon'
 
@@ -13,21 +13,29 @@ export function uOfTDateButtonSelector(date: string): string {
   return `button.single-date-select-button[data-year="${Number(year)}"][data-month="${Number(month)}"][data-day="${Number(day)}"]`
 }
 
-export function uOfTTimeMatches(label: string, time: string): boolean {
+/** 24-hour start time (HH:mm) of a U of T slot label such as "9 - 9:55 PM". */
+export function uOfTStartTime(label: string): string | undefined {
   const match = /^(\d{1,2})(?::(\d{2}))?\s*(AM|PM)?\s*(?:-|–|—|to)\s*(\d{1,2})(?::\d{2})?\s*(AM|PM)$/i.exec(label.trim())
-  if (!match) return false
+  if (!match) return undefined
   const hour = Number(match[1])
   let period = (match[3] ?? match[5]).toUpperCase()
   // When only the end has AM/PM, account for a slot crossing noon/midnight.
   if (!match[3] && hour % 12 > Number(match[4]) % 12) period = period === 'AM' ? 'PM' : 'AM'
   const startHour = hour % 12 + (period === 'PM' ? 12 : 0)
-  return `${String(startHour).padStart(2, '0')}:${match[2] ?? '00'}` === time
+  return `${String(startHour).padStart(2, '0')}:${match[2] ?? '00'}`
+}
+
+export function uOfTTimeMatches(label: string, time: string): boolean {
+  return uOfTStartTime(label) === time
 }
 
 export class UofTBookingProvider implements BookingProvider {
   private pageReady = false
   private courtNames: string[] = []
-  private scheduledClick?: { task: ScheduledCourtClick; requestKey: string; court: string }
+  private releaseLoop?: { task: ReleaseRefreshLoop; requestKey: string }
+  private reserveResponses: { data: URLSearchParams; outcome: Promise<'confirmed' | 'captcha' | 'rejected'> }[] = []
+  private onReserveResponse?: () => void
+  private releaseListener?: (response: Response) => void
   private submittedCourtId?: string
   private submissionOutcome?: 'confirmed' | 'captcha' | 'rejected'
   private submissionResponse?: Promise<'confirmed' | 'captcha' | 'rejected'>
@@ -53,8 +61,7 @@ export class UofTBookingProvider implements BookingProvider {
   }
 
   async prepare(request: BookingRequest, releaseAtMs?: number): Promise<void> {
-    await this.scheduledClick?.task.dispose()
-    this.scheduledClick = undefined
+    await this.stopReleaseLoop()
     // A live submission can require CAPTCHA; keep its browser accessible.
     const page = await this.browser.show()
     this.pageReady = false
@@ -62,6 +69,7 @@ export class UofTBookingProvider implements BookingProvider {
     this.submissionOutcome = undefined
     this.submissionResponse = undefined
     if (this.responseListener) page.off('response', this.responseListener)
+    this.watchReservations(page)
     await this.navigate(page)
     this.requireSession(page)
     await this.waitForDatePicker(page)
@@ -72,10 +80,12 @@ export class UofTBookingProvider implements BookingProvider {
     if (await dateButton.count()) {
       await this.selectDate(page, request.date)
       if (request.courtPreferences[0]) await this.selectCourt(page, request.courtPreferences[0])
-      const court = request.courtPreferences[0] ?? (request.allowAnyCourt ? this.courtNames[0] : undefined)
-      if (court && releaseAtMs !== undefined && releaseAtMs > Date.now()) {
-        const task = await ScheduledCourtClick.create(page, `${uOfTDateButtonSelector(request.date)}.single-date-select-one-click`, court, releaseAtMs)
-        this.scheduledClick = { task, court, requestKey: JSON.stringify(request) }
+      const courts = [...new Set([...request.courtPreferences, ...(request.allowAnyCourt ? this.courtNames : [])])]
+      if (courts.length && releaseAtMs !== undefined && Date.now() < releaseAtMs + RELEASE_LOOP_TIMING.stopAfterReleaseMs) {
+        // Shortly before release, keep clicking the court tab and click Book the
+        // moment the slot opens, all inside Chromium (see ReleaseRefreshLoop).
+        const task = await ReleaseRefreshLoop.start(page, { dateSelector: `${uOfTDateButtonSelector(request.date)}.single-date-select-one-click`, courts, time: request.time, releaseAtMs })
+        this.releaseLoop = { task, requestKey: JSON.stringify(request) }
       }
     }
     this.pageReady = true
@@ -96,18 +106,9 @@ export class UofTBookingProvider implements BookingProvider {
     this.requirePreparedPage()
     const page = await this.browser.getPage()
     this.requireSession(page)
-    const scheduled = this.scheduledClick
-    let refreshedCourt: string | undefined
-    if (scheduled) {
-      try {
-        if (scheduled.requestKey === JSON.stringify(request)) {
-          await scheduled.task.wait()
-          refreshedCourt = scheduled.court
-        }
-      } finally { await scheduled.task.dispose(); if (this.scheduledClick === scheduled) this.scheduledClick = undefined }
-    }
-    // Preparation selects the date. On the normal release path the first
-    // interaction is the preferred court click, which refreshes its slots.
+    await this.stopReleaseLoop()
+    // Preparation selects the date. Every court check starts with a court click,
+    // which refreshes its slots.
     const selectedDate = page.locator(`${uOfTDateButtonSelector(request.date)}.single-date-select-one-click[aria-current="date"]:visible`)
     if (!(await selectedDate.count())) {
       // A date entering the picker at midnight still needs to be selected.
@@ -120,7 +121,7 @@ export class UofTBookingProvider implements BookingProvider {
     }
     const order = [...new Set([...request.courtPreferences, ...(request.allowAnyCourt ? this.courtNames : [])])]
     for (const name of order) {
-      const panel = await this.selectCourt(page, name, name === refreshedCourt ? undefined : request.date)
+      const panel = await this.selectCourt(page, name, request.date)
       // Read the schedule in one browser round trip, rather than awaiting a
       // separate protocol call for every earlier time slot on the page.
       const rows = await panel.locator('.booking-slot-item').evaluateAll(nodes => nodes.map(row => {
@@ -136,6 +137,129 @@ export class UofTBookingProvider implements BookingProvider {
       }
     }
     return []
+  }
+
+  async getSchedule(): Promise<ScheduleDay[]> {
+    const page = await this.browser.getPage()
+    this.requireSession(page)
+    await this.waitForDatePicker(page)
+    const courts = await this.readCourtNames(page)
+    // Visit every date and court tab in one browser task, the same clicks a person makes.
+    const days = await page.evaluate(async ({ courts, timeoutMs }) => {
+      const clean = (text: string | null | undefined): string => (text ?? '').replace(/\s+/g, ' ').trim()
+      const visibleRows = (): Element[] => Array.from(document.querySelectorAll('.booking-slot-item')).filter(row => row.checkVisibility())
+      // Resolves false when no rows arrive, e.g. a day with no slots left.
+      const clickAndWait = (target: HTMLElement): Promise<boolean> => {
+        const previous = visibleRows()[0] ?? null
+        return new Promise(resolve => {
+          const check = (): void => {
+            const fresh = visibleRows()[0]
+            if ((!previous || !previous.isConnected || !previous.checkVisibility()) && fresh && fresh !== previous) done(true)
+          }
+          const done = (ok: boolean): void => { observer.disconnect(); clearTimeout(timeout); resolve(ok) }
+          const observer = new MutationObserver(check)
+          observer.observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['hidden', 'style', 'class'] })
+          const timeout = window.setTimeout(() => done(false), timeoutMs)
+          target.click()
+        })
+      }
+      const dateButtons = 'button.single-date-select-one-click'
+      const dates = Array.from(document.querySelectorAll<HTMLButtonElement>(dateButtons)).filter(button => button.checkVisibility())
+        .map(button => ({ year: button.dataset.year ?? '', month: button.dataset.month ?? '', day: button.dataset.day ?? '' }))
+      const result: { year: string; month: string; day: string; courts: { court: string; rows: { label: string; status: 'open' | 'opens-later' | 'booked' | 'unavailable'; note: string }[] }[] }[] = []
+      for (const date of dates) {
+        // The picker re-renders on selection, so look the button up again each time.
+        const button = Array.from(document.querySelectorAll<HTMLButtonElement>(`${dateButtons}[data-year="${date.year}"][data-month="${date.month}"][data-day="${date.day}"]`)).find(node => node.checkVisibility())
+        if (!button) continue
+        const hasRows = button.getAttribute('aria-current') === 'date' ? visibleRows().length > 0 : await clickAndWait(button)
+        const byCourt: (typeof result)[number]['courts'] = []
+        for (const court of hasRows ? courts : []) {
+          const tab = Array.from(document.querySelectorAll<HTMLButtonElement>('button[role="tab"]')).find(node => clean(node.textContent) === court && node.checkVisibility())
+          if (!tab || !(await clickAndWait(tab))) continue
+          byCourt.push({ court, rows: visibleRows().map(row => {
+            const book = Array.from(row.querySelectorAll<HTMLButtonElement>('button:not([disabled]):not(.disabled)'))
+              .find(node => /^\s*book(?:\s+now)?\s*$/i.test(node.textContent ?? '') && node.checkVisibility() && node.getAttribute('aria-disabled') !== 'true')
+            const text = clean(row.textContent)
+            const label = clean(row.querySelector('strong')?.textContent)
+            if (book) return { label, status: 'open' as const, note: '' }
+            if (/booked/i.test(clean(row.querySelector('.booking-slot-reserved-item')?.textContent))) return { label, status: 'booked' as const, note: 'Booked by you' }
+            const opensAt = /opens at .*?[AP]M/i.exec(text)?.[0]
+            if (opensAt) return { label, status: 'opens-later' as const, note: opensAt }
+            // "Unavailable" that still lists a free spot has not opened yet.
+            const spotsLeft = Number(/(\d+)\s+spots?\s+available/i.exec(text)?.[1] ?? 0)
+            if (spotsLeft > 0) return { label, status: 'opens-later' as const, note: `Unavailable, ${spotsLeft} spot${spotsLeft > 1 ? 's' : ''} left: not open yet` }
+            return { label, status: 'unavailable' as const, note: 'No spots available' }
+          }) })
+        }
+        result.push({ ...date, courts: byCourt })
+      }
+      return result
+    }, { courts, timeoutMs: 5_000 })
+    return days.map(day => {
+      const slots = new Map<string, ScheduleSlot>()
+      for (const { court, rows } of day.courts) {
+        for (const row of rows) {
+          const time = uOfTStartTime(row.label)
+          if (!time) continue
+          const slot = slots.get(time) ?? { time, label: row.label, courts: [] }
+          slot.courts.push({ court, status: row.status as SlotStatus, ...(row.note ? { note: row.note } : {}) })
+          slots.set(time, slot)
+        }
+      }
+      return { date: `${day.year}-${day.month.padStart(2, '0')}-${day.day.padStart(2, '0')}`, slots: [...slots.values()].sort((a, b) => a.time.localeCompare(b.time)) }
+    })
+  }
+
+  async waitForReleaseClick(request: BookingRequest): Promise<ReleaseClick | undefined> {
+    const loop = this.releaseLoop
+    if (!loop || loop.requestKey !== JSON.stringify(request)) return undefined
+    const clicked = await loop.task.result().finally(async () => {
+      await loop.task.dispose()
+      if (this.releaseLoop === loop) this.releaseLoop = undefined
+    })
+    const court: CourtAvailability = { id: `${clicked.court}|${clicked.slotNumber}`, name: clicked.court, available: true }
+    this.submittedCourtId = court.id
+    const [year, month, day] = request.date.split('-').map(Number)
+    const ids = Object.entries(clicked.identifiers)
+    this.submissionResponse = this.awaitReservation(data => data.get('fId') === clicked.facilityId &&
+      Number(data.get('y')) === year && Number(data.get('m')) === month && Number(data.get('d')) === day &&
+      ids.some(([, value]) => value !== null) && ids.every(([key, value]) => value === null || data.get(key) === value))
+    return { court, clickedAt: clicked.clickedAt, refreshes: clicked.refreshes }
+  }
+
+  private async stopReleaseLoop(): Promise<void> {
+    const loop = this.releaseLoop
+    this.releaseLoop = undefined
+    await loop?.task.dispose()
+  }
+
+  /** Records every reservation POST from preparation on, so a Book click made inside the page is never missed. */
+  private watchReservations(page: Page): void {
+    if (this.releaseListener) page.off('response', this.releaseListener)
+    this.reserveResponses = []
+    this.onReserveResponse = undefined
+    this.releaseListener = (response) => {
+      const url = new URL(response.url())
+      if (url.origin !== new URL(this.bookingUrl).origin || url.pathname !== '/booking/reserve' || response.request().method() !== 'POST') return
+      const outcome = response.json().then((result: { Success?: boolean; ErrorCode?: number }) =>
+        result.Success === true ? 'confirmed' as const : result.ErrorCode === 100 ? 'captcha' as const : 'rejected' as const)
+      this.reserveResponses.push({ data: new URLSearchParams(response.request().postData() ?? ''), outcome })
+      this.onReserveResponse?.()
+    }
+    page.on('response', this.releaseListener)
+  }
+
+  private awaitReservation(matches: (data: URLSearchParams) => boolean): Promise<'confirmed' | 'captcha' | 'rejected'> {
+    return new Promise(resolve => {
+      const check = (): boolean => {
+        const hit = this.reserveResponses.find(entry => matches(entry.data))
+        if (!hit) return false
+        this.onReserveResponse = undefined
+        void hit.outcome.then(outcome => { this.submissionOutcome = outcome; resolve(outcome) }).catch(() => undefined)
+        return true
+      }
+      if (!check()) this.onReserveResponse = () => { check() }
+    })
   }
 
   async reserve(request: BookingRequest, court: CourtAvailability): Promise<BookingResult> {
@@ -191,7 +315,8 @@ export class UofTBookingProvider implements BookingProvider {
     const row = panel.locator(`.booking-slot-item[data-slot-number="${slotNumber}"]`)
     // Confirmation must belong to the submitted row, never another court's Booked text.
     try {
-      const booked = row.getByText(/^\s*booked\s*$/i)
+      // Live U of T renders "<icon>done</icon>Booked" inside .booking-slot-reserved-item.
+      const booked = row.getByText(/^\s*booked\s*$/i).or(row.locator('.booking-slot-reserved-item').filter({ hasText: /booked/i })).first()
       const outcome = await booked.isVisible() ? 'confirmed' : this.submissionOutcome ?? await Promise.race([
         this.submissionResponse ?? new Promise<never>(() => {}),
         booked.waitFor({ state: 'visible', timeout: 12_000 }).then(() => 'confirmed' as const)
@@ -213,8 +338,7 @@ export class UofTBookingProvider implements BookingProvider {
   }
 
   async close(): Promise<void> {
-    await this.scheduledClick?.task.dispose()
-    this.scheduledClick = undefined
+    await this.stopReleaseLoop()
     await this.browser.close()
   }
   private requirePreparedPage(): void { if (!this.pageReady) throw new BookingError('UNKNOWN_ERROR', 'Booking page was not prepared') }
