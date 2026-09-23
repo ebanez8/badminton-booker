@@ -12,11 +12,14 @@ npm run dev
 
 For a built version, run `npm run build` then `npm start`.
 
-Choose the Toronto date and the **exact start time shown by U of T**, including
-minutes (for example, 9:10 PM). Set the court order, then choose **Arm booking**.
-The app starts its booking attempt at the 48-hour release instant. If release has
-already passed, it checks immediately after preparation. Keep the app running
-and the computer powered on; bookings are not scheduled while the app is closed.
+The app reads the live U of T schedule when it opens (and on **Refresh schedule**)
+and shows it as a calendar: one card per date U of T lists, then one card per time
+slot. Pick a slot card to lock in its date and time. Slots that are full, already
+started, or on a day you have already booked cannot be picked; U of T allows one
+court booking per day. Tick the courts to try (Court 01, 02, 03, tried in that
+order), then choose **Arm booking**. If release has already passed, it checks
+immediately after preparation. Keep the app running and the computer powered on;
+bookings are not scheduled while the app is closed.
 The app prevents automatic system sleep while a booking is active. This does not
 override manual sleep, a closed laptop lid, loss of power, or an OS restart.
 
@@ -25,15 +28,17 @@ login & arm**. MFA and CAPTCHA remain manual. Authentication uses the private
 local Chromium profile, with session restoration enabled. U of T may still
 expire a session independently.
 
+Slots as U of T shows them: **Book Now** is open; **Opens at 9 PM**, or
+**Unavailable** that still lists "1 spot available", has not opened yet;
+**Unavailable** with "No spots available" is taken; **Booked** is yours.
+
 Preparation starts two minutes before release and selects the requested date.
-At release, the app clicks the first-priority **court number**, even when that
-court is already selected. When preparation finishes ahead of release, this
-click is scheduled inside Chromium so a busy desktop app process cannot delay
-sending the click command. Cancellation clears the scheduled click. That click refreshes the court's slots; the normal
-release path does not click the date or reload the page. It reloads the full page
-only if the requested date has not entered the date picker yet. It reads each court's schedule in one browser
-round trip. The app waits for the selected date's refreshed schedule and visits courts in
-priority order. Availability checks have bounded retries. An uncertain Book
+From two seconds before release (7:59:58.000 for an 8 PM slot), a loop inside
+Chromium clicks the first ticked court's tab, which refreshes its slots, reads the
+requested slot, and clicks **Book** the moment it opens. Clicks start a random
+20–50 ms apart. If the slot is taken, the loop moves to the next ticked court; it
+stops 30 s after release. Running the loop inside Chromium keeps the desktop app
+process out of the release-critical path. Cancellation stops the loop. An uncertain Book
 submission is never automatically repeated. Complete any browser verification
 and choose **Recheck reservation**. **Stop checking** stops verification only;
 it does not cancel a reservation on U of T.

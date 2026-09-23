@@ -1,7 +1,6 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 import { chromium, type Browser, type Page } from 'playwright'
 import { BrowserManager } from '../automation/BrowserManager'
-import { ScheduledCourtClick } from '../automation/ScheduledCourtClick'
 import { UofTBookingProvider } from './UofTBookingProvider'
 import type { BookingRequest } from '../../shared/types'
 import { BookingEngine } from '../BookingEngine'
@@ -10,8 +9,11 @@ import { DateTime } from 'luxon'
 
 const request: BookingRequest = { activity: 'Badminton', date: '2030-09-23', time: '21:10', courtPreferences: ['Court 03-AC-Badminton', 'Court 02-AC-Badminton', 'Court 01-AC-Badminton'], allowAnyCourt: true, releaseRule: { mode: 'offset-hours', offsetHours: 48 } }
 const url = 'http://booking.test/booking/badminton'
+// Live U of T rows: "Unavailable" that still lists a spot (not open yet) and your own reservation.
+const closedWithSpotRow = (court: number, label: string): string => `<div class="booking-slot-item" data-slot-number="1"><div class="booking-slot-item-right booking-slot-action-item"><button class="btn btn-primary disabled" type="button" aria-label="Court 0${court}-AC-Badminton booking from undefined with undefined Unavailable">Unavailable</button></div><p role="heading" aria-level="3"><span class="sr-only">Booking for current date and facility</span><strong>${label}</strong><span class="sr-only">1 spot available</span></p><span>1 spot available</span></div>`
+const bookedByYouRow = (label: string): string => `<div class="booking-slot-item" data-slot-number="1"><div class="booking-slot-item-right booking-slot-reserved-item"><div class="btn-group"><button type="button" class="button-without-style"><span class="text-primary"><span class="material-icons-round md-18 mr-2">done</span>Booked</span></button></div></div><p role="heading" aria-level="3"><strong>${label}</strong><span class="sr-only">No spots available</span></p><span>No spots available</span></div>`
 type FixtureInteraction = { type: 'date' | 'court'; value: number; at: number }
-type FixtureWindow = { interactions: FixtureInteraction[]; courtsAvailable: boolean }
+type FixtureWindow = { interactions: FixtureInteraction[]; courtsAvailable: boolean; notOpen: boolean }
 
 // Reproduces the inspected Fusion DOM: hidden duplicate dates, lazy court panels,
 // repeated slot numbers across courts, and date selection preceding schedule refresh.
@@ -21,6 +23,7 @@ function fixture(confirm = true, emptyToday = false, sharedPanel = false): strin
     window.bookClicks = 0;
     window.interactions = [];
     window.courtsAvailable = true;
+    window.notOpen = false;
     function dates() {
       return [21, 23].map(d => '<div hidden><button class="single-date-select-button single-date-select-two-click" data-year="2030" data-month="9" data-day="'+d+'">'+d+'</button></div><button onclick="selectDate('+d+')" class="single-date-select-button single-date-select-one-click" data-year="2030" data-month="9" data-day="'+d+'" '+(d===day?'aria-current="date"':'')+'>'+d+'</button>').join('');
     }
@@ -28,6 +31,7 @@ function fixture(confirm = true, emptyToday = false, sharedPanel = false): strin
       if (${emptyToday} && day === 21) return '';
       const name = 'Court 0'+n+'-AC-Badminton';
       const available = n > 1 && window.courtsAvailable;
+      if (window.notOpen) return '<div class="booking-slot-item" data-slot-number="1"><div class="booking-slot-item-right booking-slot-reserved-item"><span>Opens at 9 PM</span></div><strong>'+(day===23?'9:10 - 9:55 PM':'7 - 7:55 AM')+'</strong><span>1 spot available</span></div>';
       return '<div class="booking-slot-item" data-slot-number="1"><strong>'+(day===23?'9:10 - 9:55 PM':'7 - 7:55 AM')+'</strong><div class="action">'+(available?'<button onclick="book(this)" aria-label="'+name+' booking">\\n\\tBook Now\\n\\t</button>':'<button class="disabled" aria-label="'+name+' unavailable">Unavailable</button>')+'</div></div>';
     }
     function render() {
@@ -69,110 +73,187 @@ describe('U of T browser flow', () => {
     expect(await page.evaluate(() => (window as unknown as { bookClicks: number }).bookClicks)).toBe(1)
   }, 20000)
 
-  it('runs the real scheduler and engine through a timed browser submission', async () => {
+  it('keeps clicking the court from before release and clicks Book the moment the slot opens', async () => {
     const releaseAt = Date.now() + 3000
     const prepared = { ...request, ...(() => {
       const desired = DateTime.fromMillis(releaseAt).setZone('America/Toronto').plus({ hours: 48 })
       return { date: desired.toISODate()!, time: desired.toFormat('HH:mm') }
     })() }
-    // Keep the production validation and 48-hour calculation; translate only
-    // the local fixture's fixed display date/time at the provider boundary.
     const scheduler = new BookingScheduler()
     const scheduledArm = scheduler.arm.bind(scheduler)
     scheduler.arm = (_at, callbacks) => scheduledArm(releaseAt, callbacks)
-    let requestAt = 0
-    let confirmed!: () => void
-    const finished = new Promise<void>(resolve => { confirmed = resolve })
-    await page.route('http://booking.test/booking/reserve', route => route.fulfill({ contentType: 'application/json', body: JSON.stringify({ Success: true }) }))
-    page.on('request', outgoing => { if (new URL(outgoing.url()).pathname === '/booking/reserve') requestAt = Date.now() })
+    let finished!: () => void
+    const done = new Promise<void>(resolve => { finished = resolve })
     const engine = new BookingEngine({
       initialize: async () => undefined, isAuthenticated: async () => true, requestAuthentication: async () => undefined,
       prepare: async () => {
         await provider.prepare(request, releaseAt)
-        expect(Date.now()).toBeLessThan(releaseAt - 100)
-        await page.evaluate(() => { (window as unknown as FixtureWindow).interactions = [] })
-      }, getAvailability: async () => {
-        const courts = await provider.getAvailability(request)
-        await page.locator('[role=tabpanel]:visible button').evaluate(node => { node.setAttribute('data-timeslot-id', 'slot3') })
-        await page.evaluate(() => {
-          const fixtureWindow = window as unknown as { book: () => void }
-          fixtureWindow.book = () => { void fetch('/booking/reserve', { method: 'POST', body: new URLSearchParams({ fId: '3', y: '2030', m: '9', d: '23', tsId: 'slot3' }) }) }
-        })
-        return courts
+        // The slot opens exactly at release; before that the row shows "Opens at".
+        await page.evaluate(at => {
+          const fixtureWindow = window as unknown as FixtureWindow
+          fixtureWindow.interactions = []
+          fixtureWindow.notOpen = true
+          setTimeout(() => { fixtureWindow.notOpen = false }, at - Date.now())
+        }, releaseAt)
       },
+      getAvailability: async () => provider.getAvailability(request),
+      waitForReleaseClick: async () => provider.waitForReleaseClick(request),
       reserve: async (_request, court) => provider.reserve(request, court),
       confirmReservation: async (_request, court) => provider.confirmReservation(request, court), close: async () => undefined
     }, scheduler, { maxRetries: 1, retryDelayMs: 250, saveHistory: async () => undefined, logger: { info: async () => undefined } })
-    engine.subscribe(state => { if (['confirmed', 'failed', 'confirmation-required'].includes(state.status)) confirmed() })
+    engine.subscribe(state => { if (['confirmed', 'failed', 'confirmation-required'].includes(state.status)) finished() })
     try {
       await engine.arm(prepared)
-      await finished
+      await done
       expect(engine.getState().status).toBe('confirmed')
-      const dispatchDelay = Date.parse(engine.getState().timing!.releaseStartedAt!) - releaseAt
-      expect(dispatchDelay).toBeGreaterThanOrEqual(0)
-      expect(dispatchDelay).toBeLessThan(250)
-      expect(requestAt).toBeGreaterThanOrEqual(releaseAt)
-      expect(requestAt - releaseAt).toBeLessThan(3000)
-      const interactions = await page.evaluate(() => (window as unknown as FixtureWindow).interactions)
-      expect(interactions).toHaveLength(1)
-      expect(interactions[0]).toMatchObject({ type: 'court', value: 3 })
-      expect(interactions[0].at).toBeGreaterThanOrEqual(releaseAt)
-      expect(interactions[0].at - releaseAt).toBeLessThan(250)
-      console.log(`Timed browser fixture: release dispatch +${dispatchDelay} ms; court click +${interactions[0].at - releaseAt} ms; reservation request +${requestAt - releaseAt} ms.`)
+      expect(engine.getState().result?.court).toBe('Court 03-AC-Badminton')
+      expect(await page.evaluate(() => (window as unknown as { bookClicks: number }).bookClicks)).toBe(1)
+      const clicks = await page.evaluate(() => (window as unknown as FixtureWindow).interactions)
+      expect(clicks.length).toBeGreaterThan(2)
+      expect(clicks.every(click => click.type === 'court' && click.value === 3)).toBe(true)
+      expect(clicks[0].at).toBeLessThan(releaseAt)
+      const bookAt = Date.parse(engine.getState().timing!.submissionStartedAt!)
+      expect(bookAt).toBeGreaterThanOrEqual(releaseAt)
+      // One fixture refresh takes 100 ms; Book must follow the first refresh that shows the slot open.
+      expect(bookAt - releaseAt).toBeLessThan(400)
+      console.log(`Release loop fixture: ${clicks.length} court clicks, first at ${clicks[0].at - releaseAt} ms; Book clicked +${bookAt - releaseAt} ms after release.`)
     } finally { await engine.close() }
   }, 15000)
 
-  it('clicks in Chromium on time while the app process is blocked, then consumes that refresh once', async () => {
+  it('moves to the next preferred court when the first slot is already taken', async () => {
+    const releaseAt = Date.now() + 3000
+    await provider.prepare(request, releaseAt)
+    await page.evaluate(() => {
+      const fixtureWindow = window as unknown as { slots: (n: number) => string }
+      const slots = fixtureWindow.slots
+      fixtureWindow.slots = n => n === 3 ? slots(n).replace(/<div class="action">[\s\S]*<\/div><\/div>$/, '<div class="action"><span>Booked</span></div></div>') : slots(n)
+    })
+    const clicked = await provider.waitForReleaseClick(request)
+    expect(clicked?.court.name).toBe('Court 02-AC-Badminton')
+    expect(await page.evaluate(() => (window as unknown as { bookClicks: number }).bookClicks)).toBe(1)
+    expect((await provider.confirmReservation(request, clicked!.court)).success).toBe(true)
+  }, 10000)
+
+  it('fails without booking when the slot is Unavailable on every court', async () => {
+    const releaseAt = Date.now() + 3000
+    await provider.prepare(request, releaseAt)
+    await page.evaluate(() => { const fixtureWindow = window as unknown as FixtureWindow; fixtureWindow.courtsAvailable = false; fixtureWindow.interactions = [] })
+    await expect(provider.waitForReleaseClick(request)).rejects.toMatchObject({ code: 'NO_AVAILABLE_COURTS' })
+    expect(await page.evaluate(() => (window as unknown as { bookClicks: number }).bookClicks)).toBe(0)
+    const courts = (await page.evaluate(() => (window as unknown as FixtureWindow).interactions)).map(click => click.value)
+    expect(courts.slice(-2)).toEqual([2, 1])
+  }, 15000)
+
+  it('spaces court clicks 20-50 ms apart', async () => {
     const releaseAt = Date.now() + 2500
     await provider.prepare(request, releaseAt)
-    await page.evaluate(() => { (window as unknown as FixtureWindow).interactions = [] })
-    await new Promise(resolve => setTimeout(resolve, Math.max(0, releaseAt - Date.now() - 50)))
-    // Simulate a stalled Electron main process without burning CPU. Chromium
-    // must perform the already-scheduled click while this thread cannot run.
-    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 350)
-    expect(Date.now() - releaseAt).toBeGreaterThanOrEqual(250)
-    expect((await provider.getAvailability(request))[0].name).toBe('Court 03-AC-Badminton')
-    const interactions = await page.evaluate(() => (window as unknown as FixtureWindow).interactions)
-    expect(interactions).toHaveLength(1)
-    expect(interactions[0]).toMatchObject({ type: 'court', value: 3 })
-    expect(interactions[0].at - releaseAt).toBeGreaterThanOrEqual(0)
-    expect(interactions[0].at - releaseAt).toBeLessThan(100)
-    console.log(`Busy app fixture: browser court click +${interactions[0].at - releaseAt} ms while app blocked through +${Date.now() - releaseAt} ms.`)
+    await page.evaluate(() => {
+      const fixtureWindow = window as unknown as FixtureWindow & { selectCourt: (court: number) => void }
+      fixtureWindow.notOpen = true
+      // Answer refreshes instantly so the spacing, not the fixture, sets the pace.
+      fixtureWindow.selectCourt = court => { fixtureWindow.interactions.push({ type: 'court', value: court, at: Date.now() }); (window as unknown as { render: () => void }).render() }
+      fixtureWindow.interactions = []
+    })
+    await page.waitForTimeout(1500)
+    const clicks = await page.evaluate(() => (window as unknown as FixtureWindow).interactions)
+    await provider.close()
+    const gaps = clicks.slice(1).map((click, index) => click.at - clicks[index].at)
+    expect(gaps.length).toBeGreaterThan(5)
+    expect(Math.min(...gaps)).toBeGreaterThanOrEqual(19)
+    expect(Math.max(...gaps)).toBeLessThanOrEqual(70)
   }, 10000)
 
-  it('cancels a browser-scheduled click before release', async () => {
+  it('reads every listed date and court into the calendar schedule', async () => {
+    expect(await provider.isAuthenticated()).toBe(true)
+    // Courts 2 and 3 show "Opens at" on the later date; court 1 is Unavailable everywhere.
+    await page.evaluate(() => {
+      const fixtureWindow = window as unknown as FixtureWindow & { slots: (n: number) => string }
+      const slots = fixtureWindow.slots
+      fixtureWindow.slots = n => { fixtureWindow.notOpen = n > 1 && document.querySelector('[data-day="23"][aria-current="date"]') !== null; return slots(n) }
+    })
+    const days = await provider.getSchedule()
+    expect(days.map(day => day.date)).toEqual(['2030-09-21', '2030-09-23'])
+    expect(days[0].slots).toEqual([{ time: '07:00', label: '7 - 7:55 AM', courts: [
+      { court: 'Court 01-AC-Badminton', status: 'unavailable', note: 'No spots available' },
+      { court: 'Court 02-AC-Badminton', status: 'open' },
+      { court: 'Court 03-AC-Badminton', status: 'open' }
+    ] }])
+    expect(days[1].slots).toEqual([{ time: '21:10', label: '9:10 - 9:55 PM', courts: [
+      { court: 'Court 01-AC-Badminton', status: 'unavailable', note: 'No spots available' },
+      { court: 'Court 02-AC-Badminton', status: 'opens-later', note: 'Opens at 9 PM' },
+      { court: 'Court 03-AC-Badminton', status: 'opens-later', note: 'Opens at 9 PM' }
+    ] }])
+    expect(await page.evaluate(() => (window as unknown as { bookClicks: number }).bookClicks)).toBe(0)
+  }, 20000)
+
+  it('reads your own booking and "Unavailable, 1 spot available" the way U of T means them', async () => {
+    expect(await provider.isAuthenticated()).toBe(true)
+    await page.evaluate(({ closed, booked }) => {
+      const fixtureWindow = window as unknown as { slots: (n: number) => string }
+      const slots = fixtureWindow.slots
+      const onThursday = (): boolean => document.querySelector('[data-day="23"][aria-current="date"]') !== null
+      fixtureWindow.slots = n => !onThursday() ? slots(n) : n === 3 ? booked : n === 2 ? closed : slots(n)
+    }, { closed: closedWithSpotRow(2, '9:10 - 9:55 PM'), booked: bookedByYouRow('9:10 - 9:55 PM') })
+    const [, thursday] = await provider.getSchedule()
+    expect(thursday.slots[0].courts).toEqual([
+      { court: 'Court 01-AC-Badminton', status: 'unavailable', note: 'No spots available' },
+      { court: 'Court 02-AC-Badminton', status: 'opens-later', note: 'Unavailable, 1 spot left: not open yet' },
+      { court: 'Court 03-AC-Badminton', status: 'booked', note: 'Booked by you' }
+    ])
+  }, 20000)
+
+  it('keeps clicking a court that shows "Unavailable, 1 spot available" and books it when it opens', async () => {
+    const releaseAt = Date.now() + 2500
+    await provider.prepare(request, releaseAt)
+    await page.evaluate(({ at, rows }) => {
+      const fixtureWindow = window as unknown as FixtureWindow & { slots: (n: number) => string }
+      const slots = fixtureWindow.slots
+      fixtureWindow.slots = n => Date.now() < at ? rows[n - 1] : slots(n)
+      fixtureWindow.interactions = []
+    }, { at: releaseAt, rows: [1, 2, 3].map(n => closedWithSpotRow(n, '9:10 - 9:55 PM')) })
+    const clicked = await provider.waitForReleaseClick(request)
+    expect(clicked?.court.name).toBe('Court 03-AC-Badminton')
+    expect(clicked!.clickedAt).toBeGreaterThanOrEqual(releaseAt)
+    const clicks = await page.evaluate(() => (window as unknown as FixtureWindow).interactions)
+    // Never treated as taken: it stayed on Court 03 the whole time.
+    expect(clicks.length).toBeGreaterThan(3)
+    expect(clicks.every(click => click.value === 3)).toBe(true)
+    expect(await page.evaluate(() => (window as unknown as { bookClicks: number }).bookClicks)).toBe(1)
+  }, 15000)
+
+  it('confirms a booking from the live "Booked" marker', async () => {
     await provider.prepare(request)
-    await page.evaluate(() => { (window as unknown as FixtureWindow).interactions = [] })
-    const task = await ScheduledCourtClick.create(page, 'button.single-date-select-one-click[data-day="23"]', 'Court 03-AC-Badminton', Date.now() + 250)
-    await task.dispose()
-    await page.waitForTimeout(350)
-    expect(await page.evaluate(() => (window as unknown as FixtureWindow).interactions)).toEqual([])
-  }, 10000)
+    const [court] = await provider.getAvailability(request)
+    await page.evaluate(booked => {
+      const fixtureWindow = window as unknown as { book: (button: HTMLElement) => void; bookClicks: number }
+      fixtureWindow.book = button => { fixtureWindow.bookClicks++; setTimeout(() => { button.closest('.booking-slot-item')!.outerHTML = booked }, 100) }
+    }, bookedByYouRow('9:10 - 9:55 PM'))
+    expect((await provider.reserve(request, court)).success).toBe(true)
+  }, 20000)
 
-  it('does not click at release if the prepared date was changed', async () => {
+  it('lists a date with no slots left as empty instead of failing', async () => {
+    await page.route('http://booking.test/**', route => route.fulfill({ contentType: 'text/html', body: fixture(true, true) }))
+    expect(await provider.isAuthenticated()).toBe(true)
+    const days = await provider.getSchedule()
+    expect(days.map(day => [day.date, day.slots.length])).toEqual([['2030-09-21', 0], ['2030-09-23', 1]])
+  }, 20000)
+
+  it('stops the release loop without booking if the prepared date was changed', async () => {
     const releaseAt = Date.now() + 1500
     await provider.prepare(request, releaseAt)
     await page.locator('button.single-date-select-one-click[data-day="21"]').click()
-    await page.waitForTimeout(200)
-    await page.evaluate(() => { (window as unknown as FixtureWindow).interactions = [] })
-    await expect(provider.getAvailability(request)).rejects.toMatchObject({ code: 'PAGE_STRUCTURE_CHANGED' })
-    expect(await page.evaluate(() => (window as unknown as FixtureWindow).interactions)).toEqual([])
+    await expect(provider.waitForReleaseClick(request)).rejects.toMatchObject({ code: 'PAGE_STRUCTURE_CHANGED' })
+    expect(await page.evaluate(() => (window as unknown as { bookClicks: number }).bookClicks)).toBe(0)
   }, 10000)
 
-  it('allows a safe retry when the scheduled court refresh stalls before submission', async () => {
-    const releaseAt = Date.now() + 2000
-    await provider.prepare(request, releaseAt)
-    await page.evaluate(() => {
-      const fixtureWindow = window as unknown as { selectCourt: (court: number) => void; restoreCourt: () => void }
-      const selectCourt = fixtureWindow.selectCourt
-      fixtureWindow.restoreCourt = () => { fixtureWindow.selectCourt = selectCourt }
-      fixtureWindow.selectCourt = () => undefined
-    })
-    await expect(provider.getAvailability(request)).rejects.toMatchObject({ code: 'NETWORK_ERROR' })
-    await page.evaluate(() => { (window as unknown as { restoreCourt: () => void }).restoreCourt() })
-    expect((await provider.getAvailability(request))[0].name).toBe('Court 03-AC-Badminton')
-    expect(await page.evaluate(() => (window as unknown as { bookClicks: number }).bookClicks)).toBe(0)
-  }, 25000)
+  it('stops clicking once the release loop is closed', async () => {
+    await provider.prepare(request, Date.now() + 1500)
+    await page.waitForTimeout(300)
+    await provider.getAvailability(request)
+    const count = (await page.evaluate(() => (window as unknown as FixtureWindow).interactions)).length
+    await page.waitForTimeout(700)
+    expect((await page.evaluate(() => (window as unknown as FixtureWindow).interactions)).length).toBe(count)
+  }, 10000)
 
   it('uses a fallback court only when permitted', async () => {
     const preferred = { ...request, courtPreferences: ['Court 01-AC-Badminton'], allowAnyCourt: false }

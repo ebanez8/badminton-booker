@@ -1,3 +1,5 @@
+import { RELEASE_TIMING } from '../shared/releaseTiming'
+
 export interface ScheduleCallbacks { prepare(): Promise<void>; release(): Promise<void>; waiting(): void; error(error: unknown): void }
 
 export class BookingScheduler {
@@ -7,7 +9,7 @@ export class BookingScheduler {
   private timer?: NodeJS.Timeout
   private generation = 0
 
-  arm(releaseAtMs: number, callbacks: ScheduleCallbacks, preparationLeadMs = 120_000): void {
+  arm(releaseAtMs: number, callbacks: ScheduleCallbacks, preparationLeadMs = RELEASE_TIMING.preparationLeadMs): void {
     this.cancel()
     const generation = this.generation
     this.scheduleAt(releaseAtMs - preparationLeadMs, generation, async () => {

@@ -56,6 +56,7 @@ function registerIpc(): void {
   ipcMain.handle('booking:arm', (_event, request: BookingRequest) => engine.arm(request))
   ipcMain.handle('booking:confirm-reservation', () => engine.confirmReservation())
   ipcMain.handle('booking:cancel', () => engine.cancel())
+  ipcMain.handle('booking:get-schedule', () => engine.loadSchedule())
   ipcMain.handle('booking:open-login', () => {
     const request = engine.getState().request
     return request ? engine.arm(request) : undefined
